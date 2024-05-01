@@ -7,18 +7,20 @@ import glob
 import argparse
 import libevdev
 
-
 class XBoxController():
 
-    def __init__(self, file, devkb, devmouse):
+    def __init__(self, file, devkb):
         self.devjs = libevdev.Device()
-        self.devmouse = devmouse
         self.mapping = self.parseFile(file, devkb, self.devjs)
         self.value = defaultdict(int)
 
     def parseFile(self, path, devkb, devjs):
-        mapping = dict()
+        # create a mapping from keyboard (kb) -> joystick (js) buttons
+        # kb event code -> js event code
+        # kb event code, kb event value -> js event value
+        mapping = dict()          # ^ 0: released, 1: pressed, 2: repeat call. see EV_KEY doc
 
+        # create the xbox controller buttons and axes
         id = dict()
         with open(path) as fp:
             for x in fp:
@@ -37,8 +39,9 @@ class XBoxController():
                             ) if evjs.type.name == "EV_ABS" else None
                         devjs.enable(evjs, ai)
 
+                        # create the table
                         keys = val.split(",")
-                        for i, k in enumerate(keys):
+                        for i,k in enumerate(keys):
                             evkb = libevdev.evbit(k)
                             if evkb is not None and evkb.is_defined and devkb.has(evkb):
                                 mapping[evkb] = evjs
@@ -46,6 +49,7 @@ class XBoxController():
                                 mapping[evkb, 1] = 1
                                 if evjs.type == libevdev.EV_ABS:
                                     steps = (ai.maximum - ai.minimum) // len(keys)
+                                    # ABS_Z and ABS_RZ have default values (not pressed down state) of minimum
                                     if var == "ABS_Z" or var == "ABS_RZ":
                                         mapping[evkb, 0] = ai.minimum
                                         mapping[evkb, 1] = ai.minimum + steps * (i+1)
@@ -65,9 +69,14 @@ class XBoxController():
         if e.code in self.mapping:
             if e.value == 2: # repeat code
                 return
+            # if we want to release an EV_ABS, i.e. set to 0, then check if the value was not changed to the other direction
+            # if that is the case, do not set it back to 0
             if self.mapping[e.code].type == libevdev.EV_ABS and e.value == 0:
+                # self.devjs.value SHOULD work the same way according to doc, but it doesnt
                 if self.mapping[e.code, 1] != self.value[self.mapping[e.code]]:
                     return
+            print("got {}, status is {}. send {} with value {}."
+                .format(e.code, e.value, self.mapping[e.code].name, self.mapping[e.code, e.value]))
             events = libevdev.InputEvent(self.mapping[e.code], self.mapping[e.code, e.value])
             self.uinput.send_events([events, libevdev.InputEvent(libevdev.EV_SYN.SYN_REPORT, 0)])
             self.value[self.mapping[e.code]] = self.mapping[e.code, e.value]
@@ -80,7 +89,7 @@ def printKeyboards(args):
         libevdev.EV_KEY.KEY_K,
         libevdev.EV_KEY.KEY_E,
         libevdev.EV_KEY.KEY_N,
-    ]
+        ]
     print("Finding all available keyboards...")
     for f in glob.glob('/dev/input/event*'):
         with open(f, 'rb') as fd:
@@ -123,20 +132,24 @@ def main(args):
                         help='List available keyboards')
     argv = parser.parse_args()
 
+    #if argv.listkbds:
+    #    printKeyboards(args)
+    #    return 0
+
+    
+    # prepare reading keyboard device
     path = argv.device
-    fd_kb = open(path, 'rb')
-    fd_mouse = open('/dev/input/event10', 'rb')  # Abrir o dispositivo de entrada do mouse
-
-    while anyKeyPressed(fd_kb):
+    fd = open(path, 'rb')
+    # wait until all keys are released (sometimes Enter is still pressed down when this script is executed)
+    while anyKeyPressed(fd):
         time.sleep(0.01)
-    devkb = libevdev.Device(fd_kb)
-    devmouse = libevdev.Device(fd_mouse)  # Criar o objeto de dispositivo para o mouse
+    devkb = libevdev.Device(fd)
 
-    controllers = []
+    # prepare writing device
+    controllers = list()
     for f in argv.configs:
-        controllers.append(XBoxController(f, devkb, devmouse))
+        controllers.append(XBoxController(f, devkb))
         print()
-
     try:
         for c in controllers:
             c.create()
